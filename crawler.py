@@ -9,7 +9,7 @@ def log(url, data):
         file.write(url)
         file.write('\n')
 
-    with open("webpage.html", "w", encoding="utf-8") as file:
+    with open("webpages/webpage.html", "w", encoding="utf-8") as file:
         soup = BeautifulSoup(data)
         file.write(soup.prettify())
 

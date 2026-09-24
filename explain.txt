@@ -1,0 +1,7 @@
+1. The user is prompted to enter in an initial search term.
+2. Using the first pages search results from Bing, we choose the initial URLs.
+    a. URLs are fetched by searching for h2 a elements in the html, then retrieving the link portion.
+    b. Then splice out the hashed portion of the redirected URL.
+    c. Convert the hash to a usable URL.
+    d. Place the URL in the site_queue and on the list of visited_urls.
+3. 

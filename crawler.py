@@ -26,7 +26,6 @@ num_errors = {}
 # limit num of sites visted
 num_visited = 0
 max_download = 30
-visit_delay = 1.0
 
 site_queue = PriorityQueue()
 visited_sites = {}
@@ -52,7 +51,10 @@ def parse_url(url):
 # https://yoast.com/ultimate-guide-robots-txt/
 
 # keep track of each robots.txt for each domain
-robots_cache = {}   
+robots_cache = {}  
+robots_time = {} 
+visit_delay = 1.0
+crawl_delay = 1.0
 
 def robot_fetch(url, parsed, user_agent="*"):
     # check if website can be scraped
@@ -68,7 +70,12 @@ def robot_fetch(url, parsed, user_agent="*"):
             rp.parse([])  # empty rules, allow everything
 
         robots_cache[robots_url] = rp
-
+        robots_time[robots_url] = datetime.now()
+    else:
+        elapsed_time = (datetime.now() - robots_time[robots_url]).total_seconds()
+        if elapsed_time < max(crawl_delay, visit_delay):
+            print(f'sleeping for {visit_delay} at {robots_url}')
+            time.sleep(visit_delay-elapsed_time)
     return robots_cache[robots_url].can_fetch("*", url)
 
 
@@ -144,35 +151,38 @@ while not site_queue.empty() and num_visited < max_download:
             continue
         
         request = urllib.request.Request(url, headers=headers)
-        response = urllib.request.urlopen(request, timeout=5)
-        status_code = response.status
-        content_type = response.headers.get("Content-Type", "")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            status_code = response.status
+            content_type = response.headers.get("Content-Type", "")
 
-        if "text/html" not in content_type.lower():
-            print(f"NOT HTML: {content_type!r} at {url}")
-            continue
-        
-        content = response.read().decode("utf-8", errors="ignore")  # convert bytes into string
-        soup = BeautifulSoup(content, "html.parser")
+            if "text/html" not in content_type.lower():
+                print(f"NOT HTML: {content_type!r} at {url}")
+                continue
+            
+            content = response.read().decode("utf-8", errors="ignore")  # convert bytes into string
+            soup = BeautifulSoup(content, "html.parser")
 
-        # log site visit        
-        num_visited += 1
-        
-        visited_sites[p["superdomain"]]  = visited_sites.get(p["superdomain"], 0) + 1
-        if p["fqdn"] != p["superdomain"]: # prevent double counting if they are the same
-            visited_sites[p["fqdn"]] = visited_sites.get(p["fqdn"], 0) + 1
+            # log site visit        
+            num_visited += 1
+            
+            visited_sites[p["superdomain"]]  = visited_sites.get(p["superdomain"], 0) + 1
+            if p["fqdn"] != p["superdomain"]: # prevent double counting if they are the same
+                visited_sites[p["fqdn"]] = visited_sites.get(p["fqdn"], 0) + 1
 
-        log(url, p, soup, content, status_code, site_priority(p), depth)
-        
-        # find links on site
-        for a in soup.find_all("a", href=True):
-            # if using base tag, append url to the domain
-            link = urljoin(url, a["href"])
+            log(url, p, soup, content, status_code, site_priority(p), depth)
+            
+            # find links on site
+            for a in soup.find_all("a", href=True):
+                # if using base tag, append url to the domain
+                link = urljoin(url, a["href"])
 
-            if link not in visited_urls and link.find("cgi") == -1:
-                visited_urls.add(link)
-                p = parse_url(link) 
-                site_queue.put((site_priority(p), depth + 1, link, p))
+                if link not in visited_urls and link.find("cgi") == -1:
+                    p = parse_url(link) 
+                    if p['scheme'] not in ('http', 'https'):
+                        # skip link if javascript, telephone num, mailto, or data
+                        continue
+                    visited_urls.add(link) # add before putting into queue, to prevent duplicates later
+                    site_queue.put((site_priority(p), depth + 1, link, p))
 
 
     except Exception as e:

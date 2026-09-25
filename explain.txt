@@ -1,7 +1,30 @@
-1. The user is prompted to enter in an initial search term.
-2. Using the first pages search results from Bing, we choose the initial URLs.
+1. the user is prompted to enter in an initial search term.
+2. using the first pages search results from bing, choose the initial URLs.
     a. URLs are fetched by searching for h2 a elements in the html, then retrieving the link portion.
-    b. Then splice out the hashed portion of the redirected URL.
-    c. Convert the hash to a usable URL.
-    d. Place the URL in the site_queue and on the list of visited_urls.
-3. 
+    b. then splice out the hashed portion of the redirected URL.
+    c. convert the hash to a usable URL.
+    d. place the URL in the site_queue and on the list of visited_urls.
+3. main crawler loop using threads:
+    a. get the top url from the site_queue and recheck it's priority scores
+        - if the priority score doesn't match, put back and check the next item (can be the same item)
+        - once the priority scores match, proceed with fetching the url
+    b. check if the website allows for crawlers:
+        - check if the robotx.txt file has already been downloaded for the domain
+        - if not, retrieve the crawl_delay, robots.txt file, and time accessed
+        - check if you can fetch for the url using the * user-agent
+        - if not, exit early and return false
+        - otherwise check the last time the site was accessed and implement crawl delay then return true
+    c. request the url and normalize it:
+        - after normalizing, check if the url has already been visited
+        - if so, move onto the next url
+        - if not, add the normalized url to the list of visited urls and proceed with the new url
+    d. check if the content type of the url is text/html
+    e. parse the url into its superdomain and fqdn components, and record the visit (used to calculate priority score)
+    f. log the visit and save webpage
+    g. check if there is a base tag, and join it to the current url if it exists
+    h. find all the links on the page:
+        - check if it ends with a bad extension, has a non-webpage redirect, is a cgi script, and if the scheme is valid
+        - normalize the link and check to make sure the link hasn't been visited already
+        - add it to visited urls and site queue
+    i. if the response fails:
+        - print the error in the terminal

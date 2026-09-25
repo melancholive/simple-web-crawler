@@ -6,7 +6,7 @@ _extractor = tldextract.TLDExtract(suffix_list_urls=()) # predownload suffix lis
 import base64
 
 from bs4 import BeautifulSoup
-from queue import PriorityQueue
+from queue import PriorityQueue, Empty
 
 import math
 import threading
@@ -14,8 +14,10 @@ import time
 from datetime import datetime, timedelta
 
 headers = {
-    "User-Agent": "web-crawler-for-class",
+    "User-Agent": "Mozilla/5.0 (compatible; ClassCrawler/4.0;)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 # blacklisted extensions
@@ -113,6 +115,7 @@ def robot_fetch(url, parsed, user_agent="*"):
     wait = (time_slot - datetime.now()).total_seconds()
     if wait > 0:
         time.sleep(wait)
+        print(f"SLEEP : {wait} seconds at {url}")
 
     return True
 
@@ -128,7 +131,7 @@ def site_priority(p, priority_score = -2.0):
         priority_score += math.log1p(fqdn_count)
     return priority_score
 
-def log(url, p, soup, data, status_code, priority, depth, bytes):
+def log(url, p, soup, status_code, priority, depth, bytes):
     # log.txt --> time | depth | bytes | status code | page priority | url
     with open("log.txt", "a", encoding="utf-8") as file:
         # file.write(f"{datetime.now()} | {depth} | {bytes} bytes | {status_code} | page priority : {priority} | {p['superdomain']} | {p['fqdn']} | {url}\n")
@@ -140,14 +143,18 @@ def log(url, p, soup, data, status_code, priority, depth, bytes):
 
 def crawler():
     global num_visited
-    while not site_queue.empty() and num_visited < max_visit:
-        priority, depth, url, p = site_queue.get()
-        current_priority = site_priority(p)
-        while current_priority != priority:
-            # lazy update to first item until the priority scores match
-            site_queue.put((current_priority, depth, url, p))
-            priority, depth, url, p = site_queue.get()
-
+    while num_visited < max_visit:
+        try:
+            priority, depth, url, p = site_queue.get(timeout=5.0)
+            current_priority = site_priority(p)
+            while current_priority != priority:
+                # lazy update to first item until the priority scores match
+                current_priority = site_priority(p)
+                site_queue.put((current_priority, depth, url, p))
+                priority, depth, url, p = site_queue.get(timeout=5.0)
+        except Empty:
+            return
+        
         try:                    
             # check if website allows crawlers
             if not robot_fetch(url,p):
@@ -165,7 +172,7 @@ def crawler():
                         continue
                     url = normalized_url
                     visited_urls.add(url)
-                        
+
                 status_code = response.status
                 content_type = response.headers.get("Content-Type", "")
 
@@ -186,7 +193,7 @@ def crawler():
 
                 with log_lock:
                     num_visited += 1
-                    log(url, p, soup, content, status_code, current_priority, depth, bytes)
+                    log(url, p, soup, status_code, current_priority, depth, bytes)
 
                 # if using base tag, append url to the base
                 base_tag = soup.find("base", href=True)
@@ -224,8 +231,6 @@ def crawler():
 
 
         except Exception as e:
-            # addresses: 403, 404
-
             # errors to address:
             # ERROR: InvalidURL: nonnumeric port: 'void(0)' at https://javascript:void(0)/
             # ERROR: URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)> at https://bit.ly/4vVyIxj
@@ -277,14 +282,14 @@ for result in search_results:
         visited_urls.add(final_url)
 
 # --- MULTI-THREADING ---
-num_threads = 10
+num_threads = 5
 threads = [threading.Thread(target=crawler, daemon=True) for i in range(num_threads)] # set background threads that exit at any time
  
 for t in threads:
     t.start()
 
 for t in threads:
-    t.join(timeout=20.0)
+    t.join(timeout=15.0)
 
 # --- FINAL SUMMARY ---
 print("Number of Documents in Queue", site_queue.qsize())

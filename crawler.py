@@ -12,9 +12,11 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-# header to spoof user-agent value
 headers = {
-    "User-Agent": "a-simple-web-crawler-sj3834-v2",
+    "User-Agent": "a-simple-web-crawler-sj3834-v3",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+              "image/avif,image/webp,*/*;q=0.8",
+
     "Accept-Language": "en-US,en;q=0.9",
 }
 
@@ -72,7 +74,7 @@ robots_delay = {} # crawl delay per domain
 def robot_fetch(url, parsed, user_agent="*"):
     # check if website can be scraped
     robots_url = f"{parsed['scheme']}://{parsed['netlock']}/robots.txt"
-    crawl_delay = timedelta(seconds=1.0)
+    crawl_delay = timedelta(seconds=5.0)
     rp = None
 
     with robot_cache_lock:
@@ -94,10 +96,10 @@ def robot_fetch(url, parsed, user_agent="*"):
             robots_time[robots_url] = datetime.now()
             robots_delay[robots_url] = crawl_delay
 
-    
-    crawl_delay = robots_delay[robots_url]
-    if robots_time[robots_url] > datetime.now():
-        time.sleep((robots_time[robots_url]-crawl_delay).total_seconds())
+    with robot_cache_lock:
+        crawl_delay = robots_delay[robots_url]
+        if robots_time[robots_url] > datetime.now():
+            time.sleep((robots_time[robots_url] - datetime.now()).total_seconds())
 
     with robot_cache_lock:
         robots_time[robots_url] = datetime.now() + crawl_delay
@@ -105,7 +107,7 @@ def robot_fetch(url, parsed, user_agent="*"):
 
     return rp.can_fetch("*", url)
 
-def site_priority(p, priority_score = -2):
+def site_priority(p, priority_score = -2.0):
     # priority queue uses min-heap --> start at a negative number
     # add penalty as you revisit superdomain and fqdn
     with visited_sites_lock:
@@ -252,7 +254,7 @@ for result in search_results:
         final_url = normalize_url(p_seed)
         print(final_url)
         
-        site_queue.put((-2, 0, final_url, p_seed)) # priority, depth, url, parsed url
+        site_queue.put((-2.0, 0, final_url, p_seed)) # priority, depth, url, parsed url
         visited_urls.add(final_url)
 
 # --- MULTI-THREADING ---
@@ -263,7 +265,7 @@ for t in threads:
     t.start()
 
 for t in threads:
-    t.join()
+    t.join(timeout=10)
 
 # --- FINAL SUMMARY ---
 print("Number of Documents in Queue", site_queue.qsize())

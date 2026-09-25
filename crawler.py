@@ -1,23 +1,25 @@
 import urllib.request
 from urllib.robotparser import RobotFileParser
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import urljoin, urlparse, urlunparse
 import tldextract
 import base64
 
 from bs4 import BeautifulSoup
 from queue import PriorityQueue
 
-import random
 import math
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # header to spoof user-agent value
 headers = {
-    "User-Agent": f"testing-a-web-crawler-aowiebfvoawieka",
+    "User-Agent": "a-simple-web-crawler-sj3834-v2",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+# blacklisted extensions
+extensions = (".jpg",".jpeg",".png",".gif",".pdf",".zip",".gz",".mp3",".mp4", ".avi",".css",".js",".ico",".svg",".xml",".rss",".doc",".docx", ".ppt",".pptx",".xls",".xlsx",".tar",".rar",".exe",".dmg")
 
 # logging data
 start_time = datetime.now()
@@ -25,7 +27,7 @@ num_errors = {}
 
 # limit num of sites visted
 num_visited = 0
-max_download = 100
+max_download = 1000
 
 # site data
 site_queue = PriorityQueue()
@@ -36,9 +38,12 @@ visited_urls = set()
 site_queue_lock = threading.Lock()
 visited_sites_lock = threading.Lock()
 visited_urls_lock = threading.Lock()
+robot_cache_lock = threading.Lock()
+log_lock = threading.Lock()
 
 def parse_url(url):
-    parsed_url = tldextract.extract(url)
+    parsed_extract = tldextract.extract(url)
+    parsed_url = urlparse(url)
     return {
         # Reference URL:
         # https://shop.example.co.uk:443/products/phones?category=smartphones#reviews
@@ -46,40 +51,59 @@ def parse_url(url):
         # "sub": parsed_url.subdomain, # "shop"
         # "domain": parsed_url.domain, # "example"
         # "suffix": parsed_url.suffix, # "co.uk"
-        "superdomain": parsed_url.top_domain_under_public_suffix, # "example.co.uk"
-        "fqdn" : parsed_url.fqdn, # "shop.example.co.uk"
-        "scheme" : urlparse(url).scheme, # https
-        "netlock": urlparse(url).netloc, # "shop.example.co.uk:443"
-        "path": urlparse(url).path, # "/products/phones"
-        "query": urlparse(url).query #"?category=smartphones"
+        "superdomain": parsed_extract.top_domain_under_public_suffix, # "example.co.uk"
+        "fqdn" : parsed_extract.fqdn, # "shop.example.co.uk"
+        "scheme" : parsed_url.scheme.lower(), # https
+        "netlock": parsed_url.netloc.lower(), # "shop.example.co.uk:443"
+        "path": parsed_url.path, # "/products/phones"
+        "query": parsed_url.query, #"?category=smartphones"
+        "params": parsed_url.params
     }
+
+def normalize_url(p):
+    path = p['path'] or '/'
+    return urlunparse((p['scheme'], p['netlock'], path, p['params'], p['query'], ''))
 
 #  --- ROBOT EXCLUSION PROTOCOL ---
 robots_cache = {}  # record robots.txt for each domain
-robots_time = {} # last time each domain was accessed
-crawl_delay = 5.0
+robots_time = {} # next available fetch time based on time accessed
+robots_delay = {} # crawl delay per domain
 
 def robot_fetch(url, parsed, user_agent="*"):
     # check if website can be scraped
     robots_url = f"{parsed['scheme']}://{parsed['netlock']}/robots.txt"
+    crawl_delay = timedelta(seconds=1.0)
+    rp = None
 
-    if robots_url not in robots_cache:
+    with robot_cache_lock:
+        rp = robots_cache.get(robots_url)
+
+    if rp is None:
         rp = RobotFileParser()
         rp.set_url(robots_url)
 
         try:
             rp.read()
+            rp_crawl_delay = rp.crawl_delay('*')
+            crawl_delay = timedelta(seconds=rp_crawl_delay) if rp_crawl_delay is not None else crawl_delay
         except Exception:
             rp.parse([])  # empty rules, allow everything
 
-        robots_cache[robots_url] = rp
-        robots_time[robots_url] = datetime.now()
-    else:
-        elapsed_time = (datetime.now() - robots_time[robots_url]).total_seconds()
-        if elapsed_time < crawl_delay:
-            print(f'sleeping for {crawl_delay} at {url}')
-            time.sleep(crawl_delay-elapsed_time)
-    return robots_cache[robots_url].can_fetch("*", url)
+        with robot_cache_lock:
+            robots_cache[robots_url] = rp
+            robots_time[robots_url] = datetime.now()
+            robots_delay[robots_url] = crawl_delay
+
+    
+    crawl_delay = robots_delay[robots_url]
+    if robots_time[robots_url] > datetime.now():
+        time.sleep((robots_time[robots_url]-crawl_delay).total_seconds())
+
+    with robot_cache_lock:
+        robots_time[robots_url] = datetime.now() + crawl_delay
+        rp = robots_cache[robots_url]
+
+    return rp.can_fetch("*", url)
 
 def site_priority(p, priority_score = -2):
     # priority queue uses min-heap --> start at a negative number
@@ -108,15 +132,11 @@ def crawler():
         with site_queue_lock:
             priority, depth, url, p = site_queue.get()
             while site_priority(p) != priority:
+                # lazy update to first item until the priority scores match
                 site_queue.put((site_priority(p), depth, url, p))
                 priority, depth, url, p = site_queue.get()
 
-        try:
-            # blacklist certain file endings
-            extensions = (".jpg",".jpeg",".png",".gif",".pdf",".zip",".gz",".mp3",".mp4", ".avi",".css",".js",".ico",".svg",".xml",".rss",".doc",".docx", ".ppt",".pptx",".xls",".xlsx",".tar",".rar",".exe",".dmg")
-            if p['path'].lower().endswith(extensions):
-                continue
-
+        try:                    
             # check if website allows crawlers
             if not robot_fetch(url,p):
                 print(f"ROBOT.TXT: prohibited at {url}")
@@ -124,8 +144,15 @@ def crawler():
 
             request = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(request, timeout=5) as response:
-                url = response.geturl() # account for url forwarding
-                # NEED TO ADD REDIRECTED URL TO VISITED SITE
+                url = response.geturl()
+                p = parse_url(url)
+                url = normalize_url(p)
+
+                with visited_urls_lock:
+                    if url in visited_urls:
+                        continue
+                    visited_urls.add(url)
+                        
                 status_code = response.status
                 content_type = response.headers.get("Content-Type", "")
 
@@ -137,14 +164,14 @@ def crawler():
                 soup = BeautifulSoup(content, "html.parser")
 
                 # log site visit        
-                num_visited += 1
-
                 with visited_sites_lock:
                     visited_sites[p["superdomain"]]  = visited_sites.get(p["superdomain"], 0) + 1
                     if p["fqdn"] != p["superdomain"]: # prevent double counting if they are the same
                         visited_sites[p["fqdn"]] = visited_sites.get(p["fqdn"], 0) + 1
 
-                log(url, p, soup, content, status_code, site_priority(p), depth)
+                with log_lock:
+                    num_visited += 1
+                    log(url, p, soup, content, status_code, priority, depth)
 
                 # if using base tag, append url to the base
                 # double check if this works as expected
@@ -156,14 +183,25 @@ def crawler():
                 # find links on site
                 for a in soup.find_all("a", href=True):
                     link = urljoin(base_link, a["href"])
+                    p_link = parse_url(link)
+                    link = normalize_url(p_link)
+
+                    # skip link with blacklisted file endings
+                    if p_link['path'].lower().endswith(extensions):
+                        continue
+
+                    # skip link if javascript, telephone num, mailto, or data
+                    if p_link['scheme'] not in ('http', 'https'):
+                        continue
+
+                    # skip link with cgi scripts
+                    if link.find("cgi") != -1:
+                        continue
+                    
                     with visited_urls_lock:
-                        if link not in visited_urls and link.find("cgi") == -1:
-                            p_link = parse_url(link) 
-                            if p_link['scheme'] not in ('http', 'https'):
-                                # skip link if javascript, telephone num, mailto, or data
-                                continue
-                            # ACCOUNT FOR EXTRA INFO IN LINK LATER
-                            visited_urls.add(link) # add before putting into queue, to prevent duplicates later
+                        if link not in visited_urls:
+                            visited_urls.add(link)
+                            
                             with site_queue_lock:
                                 site_queue.put((site_priority(p_link), depth + 1, link, p_link))
 
@@ -171,11 +209,12 @@ def crawler():
         except Exception as e:
             # address:
             # <url oppen error [ssl: certificate_verify_failed] certificate verify failed
-            
-            num_errors[e] = num_errors.get(e, 0) + 1
-            print(f"ERROR: {e} at {url}")
+            with log_lock:
+                error = f"{type(e).__name__}: {e}"
+                num_errors[error] = num_errors.get(error, 0) + 1
+            print(f"ERROR: {error} at {url}")
 
-# --------------------------
+# --- FETCH SEED PAGES ---
 
 def fetch_page(url):
     request = urllib.request.Request(url, headers=headers)
@@ -188,7 +227,6 @@ def fetch_page(url):
 
     return final_url, soup
 
-# FETCH SEED URLS FROM USER INPUT
 search_term = input("Enter your search term: ")
 search_term = search_term.replace(" ", "+") # accounts for terms with spaces
 seed_url, initial_soup = fetch_page(f"https://bing.com/?q={search_term}")
@@ -210,23 +248,24 @@ for result in search_results:
 
         # convert hash to usable url
         final_url = base64.urlsafe_b64decode(u).decode("utf-8", "ignore")
+        p_seed = parse_url(final_url)
+        final_url = normalize_url(p_seed)
         print(final_url)
         
-        site_queue.put((-2, 0, final_url, parse_url(final_url))) # priority, depth, url, parsed url
+        site_queue.put((-2, 0, final_url, p_seed)) # priority, depth, url, parsed url
         visited_urls.add(final_url)
 
-# multi-threading
-NUM_THREADS = 5
-# set background threads that exit at any time
-threads = [threading.Thread(target=crawler, daemon=True) for i in range(NUM_THREADS)] 
-queue_lock = threading.Lock()
-
+# --- MULTI-THREADING ---
+num_threads = 10
+threads = [threading.Thread(target=crawler, daemon=True) for i in range(num_threads)] # set background threads that exit at any time
+ 
 for t in threads:
     t.start()
 
 for t in threads:
     t.join()
 
+# --- FINAL SUMMARY ---
 print("Number of Documents in Queue", site_queue.qsize())
 print(f"Time take: {datetime.now() - start_time}")
 print(num_errors)

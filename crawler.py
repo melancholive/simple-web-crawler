@@ -2,6 +2,7 @@ import urllib.request
 from urllib.robotparser import RobotFileParser
 from urllib.parse import urljoin, urlparse, urlunparse
 import tldextract
+_extractor = tldextract.TLDExtract(suffix_list_urls=()) # predownload suffix list
 import base64
 
 from bs4 import BeautifulSoup
@@ -13,10 +14,7 @@ import time
 from datetime import datetime, timedelta
 
 headers = {
-    "User-Agent": "a-simple-web-crawler-sj3834-v3",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-              "image/avif,image/webp,*/*;q=0.8",
-
+    "User-Agent": "web-crawler-for-class",
     "Accept-Language": "en-US,en;q=0.9",
 }
 
@@ -29,7 +27,7 @@ num_errors = {}
 
 # limit num of sites visted
 num_visited = 0
-max_download = 1000
+max_visit = 10000
 
 # site data
 site_queue = PriorityQueue()
@@ -37,14 +35,13 @@ visited_sites = {}
 visited_urls = set()
 
 # threading locks
-site_queue_lock = threading.Lock()
 visited_sites_lock = threading.Lock()
 visited_urls_lock = threading.Lock()
 robot_cache_lock = threading.Lock()
 log_lock = threading.Lock()
 
 def parse_url(url):
-    parsed_extract = tldextract.extract(url)
+    parsed_extract = _extractor(url)
     parsed_url = urlparse(url)
     return {
         # Reference URL:
@@ -58,7 +55,7 @@ def parse_url(url):
         "scheme" : parsed_url.scheme.lower(), # https
         "netlock": parsed_url.netloc.lower(), # "shop.example.co.uk:443"
         "path": parsed_url.path, # "/products/phones"
-        "query": parsed_url.query, #"?category=smartphones"
+        "query": parsed_url.query,
         "params": parsed_url.params
     }
 
@@ -75,7 +72,6 @@ def robot_fetch(url, parsed, user_agent="*"):
     # check if website can be scraped
     robots_url = f"{parsed['scheme']}://{parsed['netlock']}/robots.txt"
     crawl_delay = timedelta(seconds=5.0)
-    rp = None
 
     with robot_cache_lock:
         rp = robots_cache.get(robots_url)
@@ -97,15 +93,28 @@ def robot_fetch(url, parsed, user_agent="*"):
             robots_delay[robots_url] = crawl_delay
 
     with robot_cache_lock:
-        crawl_delay = robots_delay[robots_url]
-        if robots_time[robots_url] > datetime.now():
-            time.sleep((robots_time[robots_url] - datetime.now()).total_seconds())
-
-    with robot_cache_lock:
-        robots_time[robots_url] = datetime.now() + crawl_delay
         rp = robots_cache[robots_url]
 
-    return rp.can_fetch("*", url)
+    if not rp.can_fetch("*", url):
+        return False
+
+    with robot_cache_lock:
+        crawl_delay = robots_delay[robots_url]
+        current_time = datetime.now()
+        scheduled_time = robots_time[robots_url]
+        if scheduled_time <= current_time:
+            time_slot = current_time
+        else:
+            time_slot = scheduled_time
+
+        # reserve slot for the next thread
+        robots_time[robots_url] = time_slot + crawl_delay
+
+    wait = (time_slot - datetime.now()).total_seconds()
+    if wait > 0:
+        time.sleep(wait)
+
+    return True
 
 def site_priority(p, priority_score = -2.0):
     # priority queue uses min-heap --> start at a negative number
@@ -119,10 +128,11 @@ def site_priority(p, priority_score = -2.0):
         priority_score += math.log1p(fqdn_count)
     return priority_score
 
-def log(url, p, soup, data, status_code, priority, depth):
-    # log.txt --> time | depth | bytes | status code | page priority | domain priority | url
+def log(url, p, soup, data, status_code, priority, depth, bytes):
+    # log.txt --> time | depth | bytes | status code | page priority | url
     with open("log.txt", "a", encoding="utf-8") as file:
-        file.write(f"{datetime.now()} | {depth} | {len(data)} bytes | {status_code} | page priority : {priority} | {p['superdomain']} | {p['fqdn']} | {url}\n")
+        # file.write(f"{datetime.now()} | {depth} | {bytes} bytes | {status_code} | page priority : {priority} | {p['superdomain']} | {p['fqdn']} | {url}\n")
+        file.write(f"{datetime.now()} | {depth} | {bytes} bytes | {status_code} | page priority : {priority} | {url}\n")
 
     # /webpages --> html of webpage
     with open(f"webpages/webpage{num_visited}.html", "w", encoding="utf-8") as file:
@@ -130,13 +140,13 @@ def log(url, p, soup, data, status_code, priority, depth):
 
 def crawler():
     global num_visited
-    while not site_queue.empty() and num_visited < max_download:
-        with site_queue_lock:
+    while not site_queue.empty() and num_visited < max_visit:
+        priority, depth, url, p = site_queue.get()
+        current_priority = site_priority(p)
+        while current_priority != priority:
+            # lazy update to first item until the priority scores match
+            site_queue.put((current_priority, depth, url, p))
             priority, depth, url, p = site_queue.get()
-            while site_priority(p) != priority:
-                # lazy update to first item until the priority scores match
-                site_queue.put((site_priority(p), depth, url, p))
-                priority, depth, url, p = site_queue.get()
 
         try:                    
             # check if website allows crawlers
@@ -148,11 +158,12 @@ def crawler():
             with urllib.request.urlopen(request, timeout=5) as response:
                 url = response.geturl()
                 p = parse_url(url)
-                url = normalize_url(p)
+                normalized_url = normalize_url(p)
 
                 with visited_urls_lock:
-                    if url in visited_urls:
+                    if normalized_url in visited_urls:
                         continue
+                    url = normalized_url
                     visited_urls.add(url)
                         
                 status_code = response.status
@@ -162,7 +173,9 @@ def crawler():
                     print(f"NOT HTML: {content_type!r} at {url}")
                     continue
                 
-                content = response.read().decode("utf-8", errors="ignore")  # convert bytes into string
+                content = response.read()
+                bytes = len(content)
+                content = content.decode("utf-8", errors="ignore")  # convert bytes into string
                 soup = BeautifulSoup(content, "html.parser")
 
                 # log site visit        
@@ -173,47 +186,53 @@ def crawler():
 
                 with log_lock:
                     num_visited += 1
-                    log(url, p, soup, content, status_code, priority, depth)
+                    log(url, p, soup, content, status_code, current_priority, depth, bytes)
 
                 # if using base tag, append url to the base
-                # double check if this works as expected
                 base_tag = soup.find("base", href=True)
                 base_link = urljoin(url, base_tag["href"]) if base_tag else url # double check if this works
-                if (base_tag):
-                    print("BAsE TAG : ", url, base_tag, base_tag["href"], base_link)
+                # if (base_tag):
+                #     print("BASE TAG : ", url, base_tag, base_tag["href"], base_link)
                 
                 # find links on site
                 for a in soup.find_all("a", href=True):
-                    link = urljoin(base_link, a["href"])
+                    href = a["href"].lower()
+
+                    # skip link with blacklisted file endings
+                    if href.endswith(extensions):
+                        continue
+
+                    # skip non url redirects
+                    if href.startswith(('javascript:', 'mailto:', 'tel:', 'data:', 'ftp:', 'file:')):
+                        continue
+                    
+                    # skip link with cgi scripts
+                    if href.find("cgi-bin") != -1:
+                        continue
+
+                    link = urljoin(base_link, a['href'])
                     p_link = parse_url(link)
                     link = normalize_url(p_link)
 
-                    # skip link with blacklisted file endings
-                    if p_link['path'].lower().endswith(extensions):
-                        continue
-
-                    # skip link if javascript, telephone num, mailto, or data
                     if p_link['scheme'] not in ('http', 'https'):
                         continue
 
-                    # skip link with cgi scripts
-                    if link.find("cgi") != -1:
-                        continue
-                    
                     with visited_urls_lock:
                         if link not in visited_urls:
                             visited_urls.add(link)
-                            
-                            with site_queue_lock:
-                                site_queue.put((site_priority(p_link), depth + 1, link, p_link))
+                            site_queue.put((site_priority(p_link), depth + 1, link, p_link))
 
 
         except Exception as e:
-            # address:
-            # <url oppen error [ssl: certificate_verify_failed] certificate verify failed
-            with log_lock:
-                error = f"{type(e).__name__}: {e}"
-                num_errors[error] = num_errors.get(error, 0) + 1
+            # addresses: 403, 404
+
+            # errors to address:
+            # ERROR: InvalidURL: nonnumeric port: 'void(0)' at https://javascript:void(0)/
+            # ERROR: URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)> at https://bit.ly/4vVyIxj
+            # ERROR: URLError: <urlopen error [SSL: TLSV1_ALERT_INTERNAL_ERROR] tlsv1 alert internal error (_ssl.c:1032)> at https://litterbox.koyu.space/
+            # ERROR: URLError: <urlopen error [Errno 11001] getaddrinfo failed> at http://www.insertlink.ccc/
+            error = f"{type(e).__name__}: {e}"
+            num_errors[error] = num_errors.get(error, 0) + 1
             print(f"ERROR: {error} at {url}")
 
 # --- FETCH SEED PAGES ---
@@ -265,7 +284,7 @@ for t in threads:
     t.start()
 
 for t in threads:
-    t.join(timeout=10)
+    t.join(timeout=20.0)
 
 # --- FINAL SUMMARY ---
 print("Number of Documents in Queue", site_queue.qsize())

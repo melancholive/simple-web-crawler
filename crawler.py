@@ -14,20 +14,23 @@ import time
 from datetime import datetime, timedelta
 
 headers = {
-    "User-Agent": "Mozilla/5.0 (compatible; ClassCrawler/4.0;)",
+    "User-Agent": "SimpleWebCrawlerHW1/41.0",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-US,en;q=0.9",
     "Upgrade-Insecure-Requests": "1",
 }
 
 # blacklisted extensions
-extensions = (".jpg",".jpeg",".png",".gif",".pdf",".zip",".gz",".mp3",".mp4", ".avi",".css",".js",".ico",".svg",".xml",".rss",".doc",".docx", ".ppt",".pptx",".xls",".xlsx",".tar",".rar",".exe",".dmg")
+extensions = (".jpg",".jpeg",".png",".gif",".pdf",".zip",".gz",".mp3",".mp4", ".avi",".css",".js",".ico",".svg",".xml",".rss",".doc",".docx", ".ppt",".pptx",".xls",".xlsx",".tar",".rar",".exe",".dmg", ".mi", ".deb", ".ddl")
 
 # logging data
 start_time = datetime.now()
 num_errors = {}
+total_bytes = 0
+open('log.txt', 'w').close() # clean previous logs
+log_file = open("log.txt", "a", encoding="utf-8")
 
-# limit num of sites visted
+# site_visits
 num_visited = 0
 max_visit = 10000
 
@@ -41,6 +44,7 @@ visited_sites_lock = threading.Lock()
 visited_urls_lock = threading.Lock()
 robot_cache_lock = threading.Lock()
 log_lock = threading.Lock()
+stop_crawl = threading.Event()
 
 def parse_url(url):
     parsed_extract = _extractor(url)
@@ -57,13 +61,13 @@ def parse_url(url):
         "scheme" : parsed_url.scheme.lower(), # https
         "netlock": parsed_url.netloc.lower(), # "shop.example.co.uk:443"
         "path": parsed_url.path, # "/products/phones"
-        "query": parsed_url.query,
-        "params": parsed_url.params
+        # "query": parsed_url.query,
+        # "params": parsed_url.params
     }
 
 def normalize_url(p):
     path = p['path'] or '/'
-    return urlunparse((p['scheme'], p['netlock'], path, p['params'], p['query'], ''))
+    return urlunparse((p['scheme'], p['netlock'], path, '', '', ''))
 
 #  --- ROBOT EXCLUSION PROTOCOL ---
 robots_cache = {}  # record robots.txt for each domain
@@ -87,6 +91,7 @@ def robot_fetch(url, parsed, user_agent="*"):
             rp_crawl_delay = rp.crawl_delay('*')
             crawl_delay = timedelta(seconds=rp_crawl_delay) if rp_crawl_delay is not None else crawl_delay
         except Exception:
+
             rp.parse([])  # empty rules, allow everything
 
         with robot_cache_lock:
@@ -114,8 +119,11 @@ def robot_fetch(url, parsed, user_agent="*"):
 
     wait = (time_slot - datetime.now()).total_seconds()
     if wait > 0:
-        time.sleep(wait)
+        stop_crawl.wait(wait)
         print(f"SLEEP : {wait} seconds at {url}")
+
+        if stop_crawl.is_set():
+            return
 
     return True
 
@@ -127,35 +135,37 @@ def site_priority(p, priority_score = -2.0):
         priority_score += math.log1p(superdomain_count)
 
         fqdn_count = visited_sites.get(p['fqdn'],0)
-        
         priority_score += math.log1p(fqdn_count)
     return priority_score
 
-def log(url, p, soup, status_code, priority, depth, bytes):
+def log(url, p, soup, status_code, priority, depth, bytes, visit_number):
     # log.txt --> time | depth | bytes | status code | page priority | url
-    with open("log.txt", "a", encoding="utf-8") as file:
+    with log_lock:
         # file.write(f"{datetime.now()} | {depth} | {bytes} bytes | {status_code} | page priority : {priority} | {p['superdomain']} | {p['fqdn']} | {url}\n")
-        file.write(f"{datetime.now()} | {depth} | {bytes} bytes | {status_code} | page priority : {priority} | {url}\n")
+        log_file.write(f"{datetime.now()} | {depth} | {bytes} bytes | {status_code} | page priority : {priority} | {url}\n")
 
     # /webpages --> html of webpage
-    with open(f"webpages/webpage{num_visited}.html", "w", encoding="utf-8") as file:
+    with open(f"webpages/webpage{visit_number}.html", "w", encoding="utf-8") as file:
         file.write(soup.prettify())
 
 def crawler():
     global num_visited
-    while num_visited < max_visit:
+    global total_bytes
+    while num_visited < max_visit and not stop_crawl.is_set():
         try:
-            priority, depth, url, p = site_queue.get(timeout=5.0)
-            current_priority = site_priority(p)
-            while current_priority != priority:
-                # lazy update to first item until the priority scores match
-                current_priority = site_priority(p)
-                site_queue.put((current_priority, depth, url, p))
+            while True:
                 priority, depth, url, p = site_queue.get(timeout=5.0)
+                current_priority = site_priority(p)
+                # print(priority,current_priority) 
+                if current_priority != priority:
+                    # lazy update to first item until the priority scores match
+                    site_queue.put((current_priority, depth, url, p))
+                    continue
+                break
         except Empty:
             return
         
-        try:                    
+        try:        
             # check if website allows crawlers
             if not robot_fetch(url,p):
                 print(f"ROBOT.TXT: prohibited at {url}")
@@ -168,8 +178,9 @@ def crawler():
                 normalized_url = normalize_url(p)
 
                 with visited_urls_lock:
-                    if normalized_url in visited_urls:
+                    if url != normalized_url and normalized_url in visited_urls:
                         continue
+                    p = parse_url(normalized_url)
                     url = normalized_url
                     visited_urls.add(url)
 
@@ -177,6 +188,7 @@ def crawler():
                 content_type = response.headers.get("Content-Type", "")
 
                 if "text/html" not in content_type.lower():
+                    # catches any files not caught by extension check
                     print(f"NOT HTML: {content_type!r} at {url}")
                     continue
                 
@@ -186,20 +198,27 @@ def crawler():
                 soup = BeautifulSoup(content, "html.parser")
 
                 # log site visit        
-                with visited_sites_lock:
-                    visited_sites[p["superdomain"]]  = visited_sites.get(p["superdomain"], 0) + 1
-                    if p["fqdn"] != p["superdomain"]: # prevent double counting if they are the same
-                        visited_sites[p["fqdn"]] = visited_sites.get(p["fqdn"], 0) + 1
-
                 with log_lock:
                     num_visited += 1
-                    log(url, p, soup, status_code, current_priority, depth, bytes)
+                    visit_number = num_visited
+                    total_bytes += bytes
+
+                    if num_visited > max_visit:
+                        stop_crawl.set() # end crawl
+                        print("--- MAX PAGE REACHED - END CRAWL ---")
+
+                log(url, p, soup, status_code, current_priority, depth, bytes, visit_number)
+
+                # add to domain + fqdn count
+                with visited_sites_lock:
+                    visited_sites[p["superdomain"]]  = visited_sites.get(p["superdomain"], 0) + 1
+                    if p["fqdn"] != p["superdomain"] and not p["fqdn"].startswith('www'): 
+                        # prevent double counting if they are the same / avoid double counting urls that start with www
+                        visited_sites[p["fqdn"]] = visited_sites.get(p["fqdn"], 0) + 1
 
                 # if using base tag, append url to the base
                 base_tag = soup.find("base", href=True)
-                base_link = urljoin(url, base_tag["href"]) if base_tag else url # double check if this works
-                # if (base_tag):
-                #     print("BASE TAG : ", url, base_tag, base_tag["href"], base_link)
+                base_link = urljoin(url, base_tag["href"]) if base_tag else url 
                 
                 # find links on site
                 for a in soup.find_all("a", href=True):
@@ -227,18 +246,23 @@ def crawler():
                     with visited_urls_lock:
                         if link not in visited_urls:
                             visited_urls.add(link)
+
+                            # add to domain + fqdn count
+                            # visited_sites[p["superdomain"]]  = visited_sites.get(p["superdomain"], 0) + 1
+                            # if p["fqdn"] != p["superdomain"] and not p["fqdn"].startswith('www'): 
+                            #     # prevent double counting if they are the same / avoid double counting urls that start with www
+                            #     visited_sites[p["fqdn"]] = visited_sites.get(p["fqdn"], 0) + 1
+
                             site_queue.put((site_priority(p_link), depth + 1, link, p_link))
 
-
         except Exception as e:
-            # errors to address:
-            # ERROR: InvalidURL: nonnumeric port: 'void(0)' at https://javascript:void(0)/
-            # ERROR: URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)> at https://bit.ly/4vVyIxj
-            # ERROR: URLError: <urlopen error [SSL: TLSV1_ALERT_INTERNAL_ERROR] tlsv1 alert internal error (_ssl.c:1032)> at https://litterbox.koyu.space/
-            # ERROR: URLError: <urlopen error [Errno 11001] getaddrinfo failed> at http://www.insertlink.ccc/
-            error = f"{type(e).__name__}: {e}"
-            num_errors[error] = num_errors.get(error, 0) + 1
-            print(f"ERROR: {error} at {url}")
+            with log_lock:
+                error = f"{type(e).__name__}: {e}"
+                num_errors[error] = num_errors.get(error, 0) + 1
+                print(f"ERROR: {error} at {url}")
+
+    if stop_crawl.is_set():
+        return
 
 # --- FETCH SEED PAGES ---
 
@@ -282,16 +306,21 @@ for result in search_results:
         visited_urls.add(final_url)
 
 # --- MULTI-THREADING ---
-num_threads = 5
-threads = [threading.Thread(target=crawler, daemon=True) for i in range(num_threads)] # set background threads that exit at any time
+num_threads = 100
+threads = [threading.Thread(target=crawler, daemon=True) for i in range(num_threads)]
  
 for t in threads:
     t.start()
 
 for t in threads:
-    t.join(timeout=15.0)
+    t.join(timeout=20.0)
 
 # --- FINAL SUMMARY ---
-print("Number of Documents in Queue", site_queue.qsize())
-print(f"Time take: {datetime.now() - start_time}")
-print(num_errors)
+time = (datetime.now() - start_time).total_seconds()
+log_file.write(f"\n--- FINAL SUMMARY ---\n")
+log_file.write(f"Websites Successfully Visited: {num_visited}\n")
+log_file.write(f"Websites Currently in Queue: {site_queue.qsize()}\n")
+log_file.write(f"Throughput: {num_visited/time}\n")
+log_file.write(f"Time Crawled: {time}\n")
+log_file.write(f"Errors: {num_errors}\n")
+log_file.close()

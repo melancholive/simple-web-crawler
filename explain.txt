@@ -1,14 +1,15 @@
 1. the user is prompted to enter in an initial search term.
-2. using the first pages search results from bing, choose the initial URLs.
+2. using the initial search results from bing, choose the seed URLs.
     a. URLs are fetched by searching for h2 a elements in the html, then retrieving the link portion.
     b. then splice out the hashed portion of the redirected URL.
     c. convert the hash to a usable URL.
     d. place the URL in the site_queue and on the list of visited_urls.
 3. main crawler loop using threads:
-    a. get the top url from the site_queue and recheck it's priority scores
+    a. lazy update site queue:
+        - get the top url from the site_queue and recheck it's priority scores
         - if the priority score doesn't match, put back and check the next item (can be the same item)
         - once the priority scores match, proceed with fetching the url
-    b. check if the website allows for crawlers:
+    b. check if the website allows for crawlers via robots.txt + implement crawl delay:
         - check if the robotx.txt file has already been downloaded for the domain
         - if not, retrieve the crawl_delay, robots.txt file, and time accessed
         - check if you can fetch for the url using the * user-agent
@@ -25,6 +26,41 @@
     h. find all the links on the page:
         - check if it ends with a bad extension, has a non-webpage redirect, is a cgi script, and if the scheme is valid
         - normalize the link and check to make sure the link hasn't been visited already
+        - update counts for superdomain and fqdn, account for them being equal or starting with www
         - add it to visited urls and site queue
     i. if the response fails:
         - print the error in the terminal
+
+notes + limitations:
+- throughput at 10 threads is quite slow, i attempted to improve throughput by optimizing thread locks, file writing, 
+  predownloading the suffix list, and minimizing computationally intensive tasks, etc.
+  currently, the default crawl delay is 5.0 seconds if robots.txt does not specify
+  the crawl delay also stacks across threads so to prevent repeated access to a domain which may also impact throughput
+  currently, the number of threads is set at 100 and throughput is consistent
+
+- currently code updates superdomain and fqdn count after crawl (see line 212 vs line 250), however due to lazy updating
+  site_queue would get locked in the loop while finding a url with an up to date priority score (more of a problem at 10 threads)
+  priority score in the logs would also almost always be -2.0 since after checking the updated priority the current url
+  would almost be guaranteed to put later in the queue, resulting in mainly urls with a -2.0 priority to be selected
+  urls of the same domain placed next to each other in the queue, would have the same priority scores as well due to multiple threads 
+  working concurrently, since the priority score calculation doesn't get adjusted until after the crawl, so if different 
+  urls of the same domain are called close together, their priority scores appear to stay the same
+
+  however, updating the superdomain and fqdn count when putting newly parsed urls into the queue resulted in more up to date priority scores. 
+  however now, it is more of a representation of discovered urls under certain superdomains and fqdn
+  not necessarily what has already been crawled -- both versions are fully functioning and availble to test
+  the benefit of this approach is that if many discovered urls belong to the same domain,
+  the priority penalty is calculated immediately and discourages the fetching of other urls of the domain from the queue
+
+- the script currently throws away query and params in the urls to avoid duplicate urls
+
+- the script takes a while for threads to join and output the final summary
+  this decreases the throughput calculation since it is calculated using the time after the final join
+  for the example logs, the throughput has been recalculated using time stamps
+
+additional errors not addressed:
+- "InvalidURL: URL can't contain control characters
+- URLError: <urlopen error no host given>
+- InvalidURL: nonnumeric port
+- UnicodeEncodeError: 'latin-1' codec can't encode...
+- UnicodeEncodeError: 'ascii' codec can't encode...

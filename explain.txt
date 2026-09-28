@@ -32,13 +32,10 @@
         - print the error in the terminal
 
 notes + limitations:
-- throughput at 10 threads is quite slow, i attempted to improve throughput by optimizing thread locks, file writing, 
-  predownloading the suffix list, and minimizing computationally intensive tasks, etc.
-  currently, the default crawl delay is 5.0 seconds if robots.txt does not specify
+- currently, the default crawl delay is 5.0 seconds if robots.txt does not specify
   the crawl delay also stacks across threads so to prevent repeated access to a domain which may also impact throughput
-  currently, the number of threads is set at 100 and throughput is consistent
 
-- currently code updates superdomain and fqdn count after crawl (see line 212 vs line 250), however due to lazy updating
+- currently, code updates superdomain and fqdn count after crawl, however due to lazy updating
   site_queue would get locked in the loop while finding a url with an up to date priority score (more of a problem at 10 threads)
   priority score in the logs would also almost always be -2.0 since after checking the updated priority the current url
   would almost be guaranteed to put later in the queue, resulting in mainly urls with a -2.0 priority to be selected
@@ -47,7 +44,7 @@ notes + limitations:
   urls of the same domain are called close together, their priority scores appear to stay the same
 
   however, updating the superdomain and fqdn count when putting newly parsed urls into the queue resulted in more up to date priority scores. 
-  however now, it is more of a representation of discovered urls under certain superdomains and fqdn
+  however now, it is more of a representation of discovered urls under certain superdomains and fqdn (see line 212 vs line 250)
   not necessarily what has already been crawled -- both versions are fully functioning and availble to test
   the benefit of this approach is that if many discovered urls belong to the same domain,
   the priority penalty is calculated immediately and discourages the fetching of other urls of the domain from the queue

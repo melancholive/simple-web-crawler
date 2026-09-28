@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta
 
 headers = {
-    "User-Agent": "SimpleWebCrawlerHW1/41.0",
+    "User-Agent": "SimpleWebCrawlerHW1/57.0",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-US,en;q=0.9",
     "Upgrade-Insecure-Requests": "1",
@@ -103,8 +103,9 @@ def robot_fetch(url, parsed, user_agent="*"):
         rp = robots_cache[robots_url]
 
     if not rp.can_fetch("*", url):
+        print(f"ROBOT.TXT: prohibited at {url}")
         return False
-
+        
     with robot_cache_lock:
         crawl_delay = robots_delay[robots_url]
         current_time = datetime.now()
@@ -113,11 +114,15 @@ def robot_fetch(url, parsed, user_agent="*"):
             time_slot = current_time
         else:
             time_slot = scheduled_time
-
+            
+        wait = (time_slot - datetime.now()).total_seconds()
+        if wait > 15: # prevent excessive wait times at a domain
+            print(f"ROBOT.TXT: excessive requests at {robots_url[:-11]}")
+            return False
+        
         # reserve slot for the next thread
         robots_time[robots_url] = time_slot + crawl_delay
-
-    wait = (time_slot - datetime.now()).total_seconds()
+    
     if wait > 0:
         stop_crawl.wait(wait)
         print(f"SLEEP : {wait} seconds at {url}")
@@ -145,8 +150,8 @@ def log(url, p, soup, status_code, priority, depth, bytes, visit_number):
         log_file.write(f"{datetime.now()} | {depth} | {bytes} bytes | {status_code} | page priority : {priority} | {url}\n")
 
     # /webpages --> html of webpage
-    with open(f"webpages/webpage{visit_number}.html", "w", encoding="utf-8") as file:
-        file.write(soup.prettify())
+    # with open(f"webpages/webpage{visit_number}.html", "w", encoding="utf-8") as file:
+    #     file.write(soup.prettify())
 
 def crawler():
     global num_visited
@@ -154,7 +159,7 @@ def crawler():
     while num_visited < max_visit and not stop_crawl.is_set():
         try:
             while True:
-                priority, depth, url, p = site_queue.get(timeout=5.0)
+                priority, depth, url, p = site_queue.get()
                 current_priority = site_priority(p)
                 # print(priority,current_priority) 
                 if current_priority != priority:
@@ -168,11 +173,10 @@ def crawler():
         try:        
             # check if website allows crawlers
             if not robot_fetch(url,p):
-                print(f"ROBOT.TXT: prohibited at {url}")
                 continue
 
             request = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(request, timeout=5) as response:
+            with urllib.request.urlopen(request, timeout=2.0) as response:
                 url = response.geturl()
                 p = parse_url(url)
                 normalized_url = normalize_url(p)
@@ -268,7 +272,7 @@ def crawler():
 
 def fetch_page(url):
     request = urllib.request.Request(url, headers=headers)
-    response = urllib.request.urlopen(request, timeout=5)
+    response = urllib.request.urlopen(request, timeout=1.0)
 
     final_url = response.geturl() # get the final url after redirects
 
@@ -313,7 +317,7 @@ for t in threads:
     t.start()
 
 for t in threads:
-    t.join(timeout=20.0)
+    t.join(timeout=60.0)
 
 # --- FINAL SUMMARY ---
 time = (datetime.now() - start_time).total_seconds()
